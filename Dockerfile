@@ -1,4 +1,4 @@
-FROM node:22.14.0-alpine AS dependencies
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS dependencies
 
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -10,17 +10,21 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
-FROM node:22.14.0-alpine AS production-dependencies
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS production-dependencies
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev \
+  && npm pkg delete devDependencies \
+  && npm pkg delete scripts \
+  && npm cache clean --force
 
-FROM node:22.14.0-alpine AS runtime
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
 
 ENV NODE_ENV=production
 WORKDIR /app
-COPY package.json ./
+RUN apk upgrade --no-cache
+COPY --from=production-dependencies --chown=node:node /app/package.json ./package.json
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node db ./db

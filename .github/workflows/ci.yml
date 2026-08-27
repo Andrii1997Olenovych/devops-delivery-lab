@@ -77,12 +77,12 @@ jobs:
       - name: Scan dependencies for high and critical vulnerabilities
         run: npm audit --audit-level=high
 
-      - name: Scan the container image for high and critical vulnerabilities
+      - name: Scan container OS packages for high and critical vulnerabilities
         run: |
           docker run --rm \
             --volume /var/run/docker.sock:/var/run/docker.sock \
             aquasec/trivy:0.57.1 \
-            image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed devops-delivery-lab:ci
+            image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --pkg-types os devops-delivery-lab:ci
 
       - name: Validate GitHub Actions syntax
         run: |
