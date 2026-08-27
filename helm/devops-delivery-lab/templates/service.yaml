@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devops-delivery-lab.fullname" . }}
+  labels:
+    {{- include "devops-delivery-lab.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "devops-delivery-lab.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api

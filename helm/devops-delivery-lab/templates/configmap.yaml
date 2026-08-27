@@ -1,0 +1,11 @@
+{{- $fullName := include "devops-delivery-lab.fullname" . }}
+{{- $redisUrl := .Values.redis.url | default (printf "redis://%s-redis:6379" $fullName) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "devops-delivery-lab.labels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.application.logLevel | quote }}
+  REDIS_URL: {{ $redisUrl | quote }}
