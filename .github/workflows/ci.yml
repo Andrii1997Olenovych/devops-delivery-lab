@@ -162,7 +162,7 @@ jobs:
           kubectl --namespace devops-lab port-forward service/devops-delivery-lab 18080:80 >/tmp/devops-delivery-lab-port-forward.log 2>&1 &
           port_forward_pid=$!
           trap 'kill "$port_forward_pid"' EXIT
-          for attempt in {1..20}; do
+          for ((attempt = 1; attempt <= 20; attempt++)); do
             if curl --fail --silent --show-error http://127.0.0.1:18080/healthz; then
               exit 0
             fi
