@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+dist
+coverage
+.env
+.env.*
+docs
+helm
+infrastructure
+test
+configs

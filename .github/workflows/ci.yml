@@ -1,0 +1,172 @@
+name: CI and local CD
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: delivery-lab-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate application and delivery manifests
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16.8-alpine
+        env:
+          POSTGRES_DB: tasks
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tasks"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7.4.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22.14.0
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run static checks and unit tests
+        run: |
+          npm run format:check
+          npm run lint
+          npm run typecheck
+          npm test
+
+      - name: Apply schema and test real PostgreSQL and Redis dependencies
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/tasks
+          REDIS_URL: redis://localhost:6379
+        run: |
+          npm run migrate
+          npm run test:integration
+
+      - name: Build the production application
+        run: npm run build
+
+      - name: Build a non-root container image
+        run: docker build --tag devops-delivery-lab:ci .
+
+      - name: Scan dependencies for high and critical vulnerabilities
+        run: npm audit --audit-level=high
+
+      - name: Scan container OS packages for high and critical vulnerabilities
+        run: |
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.57.1 \
+            image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --pkg-types os devops-delivery-lab:ci
+
+      - name: Validate GitHub Actions syntax
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/repo" \
+            --workdir /repo \
+            rhysd/actionlint:1.7.7
+
+      - name: Lint and render Helm manifests
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            alpine/helm:3.16.3 lint helm/devops-delivery-lab --set image.repository=devops-delivery-lab --set image.tag=ci
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            alpine/helm:3.16.3 template devops-delivery-lab helm/devops-delivery-lab --set image.repository=devops-delivery-lab --set image.tag=ci \
+            | docker run --rm --interactive ghcr.io/yannh/kubeconform:v0.6.7 -strict -summary
+
+  publish:
+    name: Publish immutable GHCR image
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.reference }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4.2.2
+
+      - name: Define image reference
+        id: image
+        run: echo "reference=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/devops-delivery-lab:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to GHCR
+        run: echo "${{ github.token }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Build and publish immutable image
+        run: |
+          docker build --tag "${{ steps.image.outputs.reference }}" .
+          docker push "${{ steps.image.outputs.reference }}"
+
+  deploy-local-kind:
+    name: Deploy to local Kind through trusted runner
+    needs: publish
+    runs-on: [self-hosted, macos, local-kind]
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out trusted main revision
+        uses: actions/checkout@v4.2.2
+
+      - name: Deploy, wait, and atomically roll back on failure
+        env:
+          IMAGE: ${{ needs.publish.outputs.image }}
+        run: |
+          IMAGE_REPOSITORY="${IMAGE%:*}"
+          IMAGE_TAG="${IMAGE##*:}"
+          helm upgrade --install devops-delivery-lab helm/devops-delivery-lab \
+            --namespace devops-lab \
+            --create-namespace \
+            --atomic \
+            --wait \
+            --timeout 3m \
+            --set "image.repository=${IMAGE_REPOSITORY}" \
+            --set "image.tag=${IMAGE_TAG}" \
+            --set image.pullPolicy=Always
+
+      - name: Smoke test the deployed service
+        shell: bash
+        run: |
+          kubectl --namespace devops-lab port-forward service/devops-delivery-lab 18080:80 >/tmp/devops-delivery-lab-port-forward.log 2>&1 &
+          port_forward_pid=$!
+          trap 'kill "$port_forward_pid"' EXIT
+          for ((attempt = 1; attempt <= 20; attempt++)); do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/healthz; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/devops-delivery-lab-port-forward.log
+          exit 1
